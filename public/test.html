@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Test WebSocket - Socket.io</title>
+    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 20px;
+      }
+
+      .container {
+        background: white;
+        border-radius: 20px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        width: 100%;
+        max-width: 600px;
+        padding: 30px;
+      }
+
+      h1 {
+        color: #333;
+        margin-bottom: 20px;
+        text-align: center;
+      }
+
+      .status {
+        padding: 10px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+        text-align: center;
+        font-weight: bold;
+      }
+
+      .status.connected {
+        background: #d4edda;
+        color: #155724;
+      }
+
+      .status.disconnected {
+        background: #f8d7da;
+        color: #721c24;
+      }
+
+      .messages {
+        height: 300px;
+        overflow-y: auto;
+        border: 2px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 20px;
+        background: #f9f9f9;
+      }
+
+      .message {
+        margin-bottom: 10px;
+        padding: 10px;
+        border-radius: 6px;
+        background: white;
+        border-left: 4px solid #667eea;
+      }
+
+      .message.system {
+        border-left-color: #ffc107;
+        background: #fff3cd;
+      }
+
+      .message.user {
+        border-left-color: #28a745;
+      }
+
+      .message-header {
+        font-size: 12px;
+        color: #666;
+        margin-bottom: 5px;
+      }
+
+      .message-text {
+        color: #333;
+      }
+
+      .input-group {
+        display: flex;
+        gap: 10px;
+      }
+
+      input[type="text"] {
+        flex: 1;
+        padding: 12px;
+        border: 2px solid #e0e0e0;
+        border-radius: 8px;
+        font-size: 16px;
+      }
+
+      input[type="text"]:focus {
+        outline: none;
+        border-color: #667eea;
+      }
+
+      button {
+        padding: 12px 24px;
+        background: #667eea;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-size: 16px;
+        cursor: pointer;
+        font-weight: bold;
+        transition: background 0.3s;
+      }
+
+      button:hover {
+        background: #5568d3;
+      }
+
+      button:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🧪 Test WebSocket</h1>
+
+      <div id="status" class="status disconnected">Desconectado</div>
+
+      <div id="messages" class="messages"></div>
+
+      <div class="input-group">
+        <input
+          type="text"
+          id="messageInput"
+          placeholder="Escribe un mensaje..."
+          disabled
+        />
+        <button id="sendButton" disabled>Enviar</button>
+      </div>
+    </div>
+
+    <script>
+      // Cambiar esta URL si tu servidor está en otro puerto
+      const socket = io("http://localhost:3000");
+
+      const statusDiv = document.getElementById("status");
+      const messagesDiv = document.getElementById("messages");
+      const messageInput = document.getElementById("messageInput");
+      const sendButton = document.getElementById("sendButton");
+
+      // Manejar conexión
+      socket.on("connect", () => {
+        statusDiv.textContent = "✅ Conectado";
+        statusDiv.className = "status connected";
+        messageInput.disabled = false;
+        sendButton.disabled = false;
+        addMessage("system", "Conectado al servidor", "Sistema");
+      });
+
+      // Manejar desconexión
+      socket.on("disconnect", () => {
+        statusDiv.textContent = "❌ Desconectado";
+        statusDiv.className = "status disconnected";
+        messageInput.disabled = true;
+        sendButton.disabled = true;
+        addMessage("system", "Desconectado del servidor", "Sistema");
+      });
+
+      // Escuchar mensajes del servidor
+      socket.on("message", (data) => {
+        addMessage(data.type, data.text, data.id || "Sistema");
+      });
+
+      // Enviar mensaje
+      function sendMessage() {
+        const text = messageInput.value.trim();
+        if (text) {
+          socket.emit("message", { text });
+          messageInput.value = "";
+        }
+      }
+
+      sendButton.addEventListener("click", sendMessage);
+      messageInput.addEventListener("keypress", (e) => {
+        if (e.key === "Enter") {
+          sendMessage();
+        }
+      });
+
+      // Agregar mensaje al chat
+      function addMessage(type, text, id) {
+        const messageDiv = document.createElement("div");
+        messageDiv.className = `message ${type}`;
+
+        const header = document.createElement("div");
+        header.className = "message-header";
+        header.textContent = `${id} - ${new Date().toLocaleTimeString()}`;
+
+        const textDiv = document.createElement("div");
+        textDiv.className = "message-text";
+        textDiv.textContent = text;
+
+        messageDiv.appendChild(header);
+        messageDiv.appendChild(textDiv);
+        messagesDiv.appendChild(messageDiv);
+
+        // Auto-scroll al final
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+      }
+    </script>
+  </body>
+</html>
+
