@@ -7,25 +7,38 @@ Railway es perfecto para aplicaciones con WebSockets como la tuya.
 ### Pasos:
 
 1. **Crear cuenta en Railway**
+
    - Ve a https://railway.app
    - Regístrate con GitHub (más fácil)
 
 2. **Conectar tu repositorio**
+
    - Click en "New Project"
    - Selecciona "Deploy from GitHub repo"
    - Elige tu repositorio
 
 3. **Configurar variables de entorno**
+
    - En Railway, ve a tu proyecto → Variables
    - Agrega todas las variables que necesitas (PORT, CORS_ORIGIN, AWS credentials, etc.)
    - Railway automáticamente detectará el puerto, pero puedes configurar PORT si quieres
 
-4. **¡Listo!**
-   - Railway detectará automáticamente que es Node.js
-   - Desplegará tu aplicación
-   - Te dará una URL como: `tu-app.up.railway.app`
+4. **Encontrar la URL de tu aplicación**
+
+   - **IMPORTANTE**: Sal de "Project Settings" y vuelve a la vista principal del proyecto
+   - Haz clic en el servicio "uppy-chat-websocket" (o el nombre que tenga tu servicio)
+   - En la página del servicio, busca la pestaña **"Settings"** (arriba, junto a "Deployments", "Logs", etc.)
+   - Dentro de Settings, busca la sección **"Networking"** o **"Public Networking"**
+   - Si no hay dominio público, haz clic en **"Generate Domain"** o **"Add Public Domain"**
+   - La URL aparecerá como: `tu-servicio.up.railway.app`
+
+   **Alternativa rápida:**
+
+   - En la vista principal del servicio, busca un botón o enlace que diga "Copy URL" o "View URL"
+   - O busca un icono de "globo" o "link" junto al estado "Online"
 
 ### Ventajas de Railway:
+
 - ✅ Soporta WebSockets perfectamente
 - ✅ Plan gratuito generoso ($5 gratis al mes)
 - ✅ Despliegue automático desde GitHub
@@ -50,6 +63,7 @@ Railway es perfecto para aplicaciones con WebSockets como la tuya.
 7. Click en "Create Web Service"
 
 ### Nota sobre Render:
+
 - Plan gratuito tiene limitaciones (se duerme después de 15 min de inactividad)
 - Soporta WebSockets pero con algunas limitaciones
 
@@ -65,6 +79,7 @@ Railway es perfecto para aplicaciones con WebSockets como la tuya.
 4. Despliega: `fly deploy`
 
 ### Ventajas:
+
 - ✅ Excelente soporte para WebSockets
 - ✅ Plan gratuito generoso
 - ✅ Muy rápido
@@ -89,4 +104,3 @@ AWS_SECRET_ACCESS_KEY=tu-secret-key
 ## Recomendación Final
 
 **Usa Railway** - Es la opción más sencilla y rápida para tu caso. Solo conecta GitHub y listo.
-
