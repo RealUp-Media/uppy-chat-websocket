@@ -1,11 +1,12 @@
+// IMPORTANTE: Cargar dotenv PRIMERO antes de cualquier otra importación
+// que pueda depender de variables de entorno
+import { config } from 'dotenv'
+config({ override: true })
+
 import express from 'express'
 import http from 'http'
 import { initSocket } from './socket.js'
 import cors from 'cors'
-import { config } from 'dotenv'
-
-// Cargar variables de entorno, sobrescribiendo las del sistema si existen
-config({ override: true })
 
 const app = express()
 const server = http.createServer(app)

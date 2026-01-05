@@ -107,20 +107,20 @@ export async function getConversationHistory(conversationId, limit = 50) {
  * Verifica si un influencer tiene acceso a un enrollment
  * @param {string} enrollmentId - El enrollment_id de la conversación
  * @param {string} idInfluencerMain - El custom:id_influencer_main del usuario (de Cognito)
- * @returns {Promise<boolean>} true si tiene acceso, false si no, o null si hubo error de credenciales
+ * @returns {Promise<boolean>} true si tiene acceso, false si no
  */
 export async function verifyInfluencerAccess(enrollmentId, idInfluencerMain) {
   try {
-    // La tabla uppy_enrollment tiene clave primaria compuesta (id_campaign, id_influencer)
-    // Pero buscamos por enrollment_id que es un atributo regular
-    // Usamos Scan con FilterExpression para buscar por enrollment_id
-    const result = await dynamoDB.send(new ScanCommand({
+    // Usar Query con GSI en lugar de Scan para mejor rendimiento
+    // Usa el GSI "enrollment-id-index" con enrollment_id como partition key
+    const result = await dynamoDB.send(new QueryCommand({
       TableName: 'uppy_enrollment',
-      FilterExpression: 'enrollment_id = :enrollmentId',
+      IndexName: 'enrollment-id-index',
+      KeyConditionExpression: 'enrollment_id = :enrollmentId',
       ExpressionAttributeValues: {
         ':enrollmentId': enrollmentId
       },
-      Limit: 1 // Solo necesitamos un resultado
+      Limit: 1
     }))
 
     if (!result.Items || result.Items.length === 0) {
@@ -128,18 +128,38 @@ export async function verifyInfluencerAccess(enrollmentId, idInfluencerMain) {
     }
 
     const enrollment = result.Items[0]
-
-    // Comparar con id_influencer del enrollment (que corresponde a id_influencer_main)
     return enrollment.id_influencer === idInfluencerMain
   } catch (error) {
+    // Si el índice no existe, intentar Scan como fallback
+    if (error.name === 'ResourceNotFoundException' || error.message?.includes('index')) {
+      try {
+        const scanResult = await dynamoDB.send(new ScanCommand({
+          TableName: 'uppy_enrollment',
+          FilterExpression: 'enrollment_id = :enrollmentId',
+          ExpressionAttributeValues: {
+            ':enrollmentId': enrollmentId
+          },
+          Limit: 1
+        }))
+
+        if (!scanResult.Items || scanResult.Items.length === 0) {
+          return false
+        }
+
+        const enrollment = scanResult.Items[0]
+        return enrollment.id_influencer === idInfluencerMain
+      } catch (scanError) {
+        console.error('Error verifying influencer access:', scanError)
+        return false
+      }
+    }
+
     // Si es un error de credenciales de AWS, permitir acceso con warning (solo para desarrollo)
     if (error.name === 'UnrecognizedClientException' || 
         error.message?.includes('security token') ||
         error.message?.includes('invalid')) {
-      console.warn('⚠️  Error de credenciales AWS. Permitiendo acceso temporalmente. Arregla las credenciales para producción.')
-      // En desarrollo, permitir acceso si hay error de credenciales
-      // En producción, deberías rechazar el acceso
-      return true // Cambiar a false en producción si quieres bloquear sin credenciales válidas
+      console.warn('⚠️  Error de credenciales AWS. Permitiendo acceso temporalmente.')
+      return true
     }
     
     console.error('Error verifying influencer access:', error)

@@ -10,7 +10,7 @@ export function initSocket(server) {
     }
   })
 
-  // Aplicar middleware de autenticación
+  // Aplicar middleware de autenticación (puede estar deshabilitado con DISABLE_AUTH=true)
   io.use(socketAuthMiddleware())
 
   // Almacenar conexiones activas por usuario
@@ -58,6 +58,7 @@ export function initSocket(server) {
           })
           return
         }
+        
         try {
           const hasAccess = await verifyInfluencerAccess(enrollment_id, user.id_influencer_main)
           if (!hasAccess) {
