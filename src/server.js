@@ -7,6 +7,13 @@ import express from 'express'
 import http from 'http'
 import { initSocket } from './socket.js'
 import cors from 'cors'
+import multer from 'multer'
+import { restAuthMiddleware } from './middleware/restAuth.js'
+import { getEnrollment, updateEnrollmentStatus, updateEnrollmentStep } from './services/enrollmentService.js'
+import { saveMessage, getConversationHistory, verifyInfluencerAccess } from './services/chatService.js'
+import { getNextStep, isFinalStep, getStepById } from './services/campaignFlowService.js'
+import { uploadChatFile, getChatFilePresignedUrl } from './services/s3Service.js'
+import { getIO } from './socket.js'
 
 const app = express()
 const server = http.createServer(app)
@@ -15,9 +22,441 @@ app.use(cors())
 app.use(express.json())
 app.use(express.static('public'))
 
+// Configurar multer para manejar archivos
+const storage = multer.memoryStorage()
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 100 * 1024 * 1024 // 100MB máximo
+  },
+  fileFilter: (req, file, cb) => {
+    // Tipos de archivo permitidos
+    const allowedMimeTypes = [
+      'image/jpeg',
+      'image/jpg',
+      'image/png',
+      'application/pdf',
+      'video/mp4',
+      'video/quicktime' // mov
+    ]
+    
+    // También validar por extensión
+    const allowedExtensions = ['jpg', 'jpeg', 'png', 'pdf', 'mp4', 'mov']
+    const fileExtension = file.originalname.split('.').pop().toLowerCase()
+    
+    if (allowedMimeTypes.includes(file.mimetype) && allowedExtensions.includes(fileExtension)) {
+      cb(null, true)
+    } else {
+      cb(new Error(`Tipo de archivo no permitido. Solo se permiten: ${allowedExtensions.join(', ')}`), false)
+    }
+  }
+})
+
 app.get('/health', (_, res) => {
   res.json({ status: 'ok' })
 })
+
+// Rutas API protegidas con autenticación
+const apiRouter = express.Router()
+apiRouter.use(restAuthMiddleware())
+
+/**
+ * GET /api/enrollments/:enrollmentId
+ * Obtiene un enrollment por su ID
+ */
+apiRouter.get('/enrollments/:enrollmentId', async (req, res) => {
+  try {
+    const { enrollmentId } = req.params
+    const user = req.user
+
+    // Verificar acceso para influencers
+    if (user.role === 'influencer') {
+      if (!user.id_influencer_main) {
+        return res.status(403).json({ 
+          error: 'Access denied', 
+          message: 'Invalid influencer configuration' 
+        })
+      }
+      
+      const hasAccess = await verifyInfluencerAccess(enrollmentId, user.id_influencer_main)
+      if (!hasAccess) {
+        return res.status(403).json({ 
+          error: 'Access denied', 
+          message: 'You do not have access to this enrollment' 
+        })
+      }
+    }
+
+    const enrollment = await getEnrollment(enrollmentId)
+    
+    if (!enrollment) {
+      return res.status(404).json({ 
+        error: 'Not found', 
+        message: `Enrollment ${enrollmentId} not found` 
+      })
+    }
+
+    res.json({
+      success: true,
+      enrollment
+    })
+  } catch (error) {
+    console.error('Error obteniendo enrollment:', error)
+    res.status(500).json({ 
+      error: 'Internal server error', 
+      message: error.message 
+    })
+  }
+})
+
+/**
+ * POST /api/enrollments/:enrollmentId/messages
+ * Envía un mensaje en la conversación del enrollment
+ */
+apiRouter.post('/enrollments/:enrollmentId/messages', async (req, res) => {
+  try {
+    const { enrollmentId } = req.params
+    const { message_text } = req.body
+    const user = req.user
+
+    if (!message_text || !message_text.trim()) {
+      return res.status(400).json({ 
+        error: 'Bad request', 
+        message: 'message_text is required' 
+      })
+    }
+
+    // Verificar acceso para influencers
+    if (user.role === 'influencer') {
+      if (!user.id_influencer_main) {
+        return res.status(403).json({ 
+          error: 'Access denied', 
+          message: 'Invalid influencer configuration' 
+        })
+      }
+      
+      const hasAccess = await verifyInfluencerAccess(enrollmentId, user.id_influencer_main)
+      if (!hasAccess) {
+        return res.status(403).json({ 
+          error: 'Access denied', 
+          message: 'You do not have access to this enrollment' 
+        })
+      }
+    }
+
+    // Guardar mensaje
+    const message = await saveMessage({
+      conversationId: enrollmentId,
+      senderId: user.sub,
+      senderType: user.role,
+      senderUsername: user.username,
+      messageText: message_text.trim()
+    })
+
+    // Si es un influencer, procesar flujo si aplica
+    if (user.role === 'influencer') {
+      try {
+        const enrollment = await getEnrollment(enrollmentId)
+        if (enrollment && enrollment.id_campaign && enrollment.current_step_id) {
+          const currentStep = await getStepById(enrollment.id_campaign, enrollment.current_step_id)
+          
+          // Si el paso actual es INPUT_URL o UPLOAD_FILES, avanzar automáticamente
+          if (currentStep && (currentStep.type === 'INPUT_URL' || currentStep.type === 'UPLOAD_FILES')) {
+            if (currentStep.on_complete) {
+              const nextStep = await getNextStep(enrollment.id_campaign, enrollment.current_step_id, 'on_complete')
+              if (nextStep && !isFinalStep(nextStep.step_id)) {
+                await updateEnrollmentStep(enrollmentId, nextStep.step_id)
+                console.log(`🔄 Flujo avanzado automáticamente: ${enrollmentId} -> ${nextStep.step_id}`)
+              }
+            }
+          }
+        }
+      } catch (flowError) {
+        console.error('Error procesando flujo:', flowError)
+        // No fallar el flujo si hay error, solo loguear
+      }
+    }
+
+    res.json({
+      success: true,
+      message: {
+        message_id: message.message_id,
+        conversation_id: enrollmentId,
+        sender_id: user.sub,
+        sender_type: user.role,
+        sender_username: message.sender_username || user.username,
+        message_text: message_text.trim(),
+        created_at: message.created_at
+      }
+    })
+  } catch (error) {
+    console.error('Error enviando mensaje:', error)
+    res.status(500).json({ 
+      error: 'Internal server error', 
+      message: error.message 
+    })
+  }
+})
+
+/**
+ * POST /api/enrollments/:enrollmentId/upload
+ * Sube un archivo y lo adjunta a un mensaje en la conversación
+ * Form data: file (archivo), message_text (opcional)
+ */
+apiRouter.post('/enrollments/:enrollmentId/upload', upload.single('file'), async (req, res) => {
+  try {
+    const { enrollmentId } = req.params
+    const { message_text } = req.body
+    const user = req.user
+
+    if (!req.file) {
+      return res.status(400).json({ 
+        error: 'Bad request', 
+        message: 'file is required' 
+      })
+    }
+
+    // Verificar acceso para influencers
+    if (user.role === 'influencer') {
+      if (!user.id_influencer_main) {
+        return res.status(403).json({ 
+          error: 'Access denied', 
+          message: 'Invalid influencer configuration' 
+        })
+      }
+      
+      const hasAccess = await verifyInfluencerAccess(enrollmentId, user.id_influencer_main)
+      if (!hasAccess) {
+        return res.status(403).json({ 
+          error: 'Access denied', 
+          message: 'You do not have access to this enrollment' 
+        })
+      }
+    }
+
+    // Subir archivo a S3
+    const fileInfo = await uploadChatFile(
+      req.file.buffer,
+      req.file.originalname,
+      req.file.mimetype,
+      enrollmentId
+    )
+
+    // Guardar mensaje con archivo adjunto
+    const message = await saveMessage({
+      conversationId: enrollmentId,
+      senderId: user.sub,
+      senderType: user.role,
+      senderUsername: user.username,
+      messageText: message_text?.trim() || null,
+      attachments: [fileInfo]
+    })
+
+    // Crear payload del mensaje
+    const messagePayload = {
+      message_id: message.message_id,
+      conversation_id: enrollmentId,
+      sender_id: user.sub,
+      sender_type: user.role,
+      sender_username: message.sender_username || user.username,
+      message_text: message_text?.trim() || null,
+      attachments: message.attachments || [],
+      created_at: message.created_at
+    }
+
+    // Emitir evento de socket para notificar a todos en la conversación
+    const io = getIO()
+    if (io) {
+      const room = `conversation:${enrollmentId}`
+      io.to(room).emit('new_message', messagePayload)
+      console.log(`📎 Archivo enviado en ${enrollmentId} por ${user.username} (rol: ${user.role})`)
+    }
+
+    res.json({
+      success: true,
+      message: messagePayload
+    })
+  } catch (error) {
+    console.error('Error subiendo archivo:', error)
+    
+    // Si es error de multer (validación de archivo)
+    if (error.message && error.message.includes('Tipo de archivo no permitido')) {
+      return res.status(400).json({ 
+        error: 'Bad request', 
+        message: error.message 
+      })
+    }
+    
+    res.status(500).json({ 
+      error: 'Internal server error', 
+      message: error.message 
+    })
+  }
+})
+
+/**
+ * GET /api/enrollments/:enrollmentId/files/:s3Key/url
+ * Obtiene una URL presignada para acceder a un archivo del chat
+ * Query params: expiresIn (opcional, en segundos, default: 3600)
+ */
+apiRouter.get('/enrollments/:enrollmentId/files/:s3Key/url', async (req, res) => {
+  try {
+    const { enrollmentId, s3Key } = req.params
+    const { expiresIn } = req.query
+    const user = req.user
+
+    // Verificar acceso para influencers
+    if (user.role === 'influencer') {
+      if (!user.id_influencer_main) {
+        return res.status(403).json({ 
+          error: 'Access denied', 
+          message: 'Invalid influencer configuration' 
+        })
+      }
+      
+      const hasAccess = await verifyInfluencerAccess(enrollmentId, user.id_influencer_main)
+      if (!hasAccess) {
+        return res.status(403).json({ 
+          error: 'Access denied', 
+          message: 'You do not have access to this enrollment' 
+        })
+      }
+    }
+
+    // Verificar que el archivo pertenece a este enrollment
+    if (!s3Key.startsWith(`chat-files/${enrollmentId}/`)) {
+      return res.status(403).json({ 
+        error: 'Access denied', 
+        message: 'File does not belong to this enrollment' 
+      })
+    }
+
+    const expiresInSeconds = expiresIn ? parseInt(expiresIn, 10) : 3600
+    const url = await getChatFilePresignedUrl(s3Key, expiresInSeconds)
+
+    res.json({
+      success: true,
+      url,
+      expiresIn: expiresInSeconds
+    })
+  } catch (error) {
+    console.error('Error obteniendo URL presignada:', error)
+    res.status(500).json({ 
+      error: 'Internal server error', 
+      message: error.message 
+    })
+  }
+})
+
+/**
+ * PUT /api/enrollments/:enrollmentId/status
+ * Actualiza el estado del enrollment según la respuesta del influenciador
+ * Body: { status: 'accepted' | 'rejected' | 'in_progress' | 'completed' | 'cancelled', action_id?: string }
+ */
+apiRouter.put('/enrollments/:enrollmentId/status', async (req, res) => {
+  try {
+    const { enrollmentId } = req.params
+    const { status, action_id } = req.body
+    const user = req.user
+
+    if (!status) {
+      return res.status(400).json({ 
+        error: 'Bad request', 
+        message: 'status is required' 
+      })
+    }
+
+    // Verificar acceso para influencers
+    if (user.role === 'influencer') {
+      if (!user.id_influencer_main) {
+        return res.status(403).json({ 
+          error: 'Access denied', 
+          message: 'Invalid influencer configuration' 
+        })
+      }
+      
+      const hasAccess = await verifyInfluencerAccess(enrollmentId, user.id_influencer_main)
+      if (!hasAccess) {
+        return res.status(403).json({ 
+          error: 'Access denied', 
+          message: 'You do not have access to this enrollment' 
+        })
+      }
+    }
+
+    // Obtener enrollment actual
+    const enrollment = await getEnrollment(enrollmentId)
+    if (!enrollment) {
+      return res.status(404).json({ 
+        error: 'Not found', 
+        message: `Enrollment ${enrollmentId} not found` 
+      })
+    }
+
+    // Si se proporciona action_id, procesar transición de flujo
+    let nextStepId = null
+    if (action_id && enrollment.id_campaign && enrollment.current_step_id) {
+      try {
+        const nextStep = await getNextStep(enrollment.id_campaign, enrollment.current_step_id, action_id)
+        if (nextStep) {
+          nextStepId = nextStep.step_id
+          
+          // Actualizar el paso del enrollment
+          await updateEnrollmentStep(enrollmentId, nextStepId)
+          
+          // Si es un paso final, actualizar el estado automáticamente
+          if (isFinalStep(nextStepId)) {
+            // Determinar estado basado en el step_id final
+            // Solo hay dos estados finales predeterminados: REJECTED y COMPLETED
+            let finalStatus = status
+            if (nextStepId === 'REJECTED') {
+              finalStatus = 'rejected'
+            } else if (nextStepId === 'COMPLETED') {
+              finalStatus = 'completed'
+            }
+            
+            // Actualizar estado del enrollment
+            const updatedEnrollment = await updateEnrollmentStatus(enrollmentId, finalStatus)
+            
+            return res.json({
+              success: true,
+              enrollment: updatedEnrollment,
+              flow_updated: true,
+              previous_step_id: enrollment.current_step_id,
+              current_step_id: nextStepId,
+              status_updated: true,
+              final_status: finalStatus
+            })
+          }
+        }
+      } catch (flowError) {
+        console.error('Error procesando transición de flujo:', flowError)
+        // Continuar con la actualización de estado aunque falle el flujo
+      }
+    }
+
+    // Actualizar estado del enrollment
+    const updatedEnrollment = await updateEnrollmentStatus(enrollmentId, status, {
+      current_step_id: nextStepId || enrollment.current_step_id
+    })
+
+    res.json({
+      success: true,
+      enrollment: updatedEnrollment,
+      flow_updated: !!nextStepId,
+      previous_step_id: enrollment.current_step_id,
+      current_step_id: nextStepId || enrollment.current_step_id
+    })
+  } catch (error) {
+    console.error('Error actualizando estado del enrollment:', error)
+    res.status(500).json({ 
+      error: 'Internal server error', 
+      message: error.message 
+    })
+  }
+})
+
+app.use('/api', apiRouter)
 
 initSocket(server)
 

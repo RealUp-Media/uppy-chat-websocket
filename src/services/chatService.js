@@ -11,7 +11,9 @@ export async function saveMessage(messageData) {
     conversationId, // enrollment_id
     senderId,
     senderType, // 'influencer' | 'operations'
-    messageText
+    senderUsername, // username del remitente
+    messageText,
+    attachments // Array de archivos adjuntos: [{s3Key, url, fileName, fileSize, mimeType}]
   } = messageData
 
   const messageId = uuidv4()
@@ -22,8 +24,14 @@ export async function saveMessage(messageData) {
     conversation_id: conversationId,
     sender_id: senderId,
     sender_type: senderType,
-    message_text: messageText,
+    sender_username: senderUsername || null, // Guardar username si está disponible
+    message_text: messageText || null, // Puede ser null si solo hay archivos
     created_at: now
+  }
+
+  // Agregar información de archivos adjuntos si existen
+  if (attachments && Array.isArray(attachments) && attachments.length > 0) {
+    message.attachments = attachments
   }
 
   try {
@@ -67,7 +75,7 @@ export async function getConversationHistory(conversationId, limit = 50) {
     // Si el índice no existe, intentar scan (menos eficiente pero funcional)
     if (error.name === 'ResourceNotFoundException' || error.message.includes('index')) {
       console.warn('GSI not found, falling back to scan. Consider creating conversation_id-index')
-      
+
       try {
         const result = await dynamoDB.send(new ScanCommand({
           TableName: TABLE_NAME,
@@ -79,7 +87,7 @@ export async function getConversationHistory(conversationId, limit = 50) {
         }))
 
         // Ordenar por fecha descendente
-        return (result.Items || []).sort((a, b) => 
+        return (result.Items || []).sort((a, b) =>
           new Date(b.created_at) - new Date(a.created_at)
         )
       } catch (scanError) {
@@ -92,13 +100,13 @@ export async function getConversationHistory(conversationId, limit = 50) {
         throw scanError
       }
     }
-    
+
     // Si hay error de credenciales, retornar array vacío para desarrollo
     if (error.name === 'UnrecognizedClientException' || error.message?.includes('security token')) {
       console.warn('⚠️  Error de credenciales AWS. Retornando historial vacío.')
       return []
     }
-    
+
     throw error
   }
 }
@@ -111,57 +119,130 @@ export async function getConversationHistory(conversationId, limit = 50) {
  */
 export async function verifyInfluencerAccess(enrollmentId, idInfluencerMain) {
   try {
-    // Usar Query con GSI en lugar de Scan para mejor rendimiento
-    // Usa el GSI "enrollment-id-index" con enrollment_id como partition key
-    const result = await dynamoDB.send(new QueryCommand({
-      TableName: 'uppy_enrollment',
-      IndexName: 'enrollment-id-index',
-      KeyConditionExpression: 'enrollment_id = :enrollmentId',
-      ExpressionAttributeValues: {
-        ':enrollmentId': enrollmentId
-      },
-      Limit: 1
-    }))
-
-    if (!result.Items || result.Items.length === 0) {
+    if (!idInfluencerMain) {
+      console.warn('⚠️  idInfluencerMain is null or empty')
       return false
     }
 
-    const enrollment = result.Items[0]
-    return enrollment.id_influencer === idInfluencerMain
-  } catch (error) {
-    // Si el índice no existe, intentar Scan como fallback
-    if (error.name === 'ResourceNotFoundException' || error.message?.includes('index')) {
-      try {
-        const scanResult = await dynamoDB.send(new ScanCommand({
-          TableName: 'uppy_enrollment',
-          FilterExpression: 'enrollment_id = :enrollmentId',
-          ExpressionAttributeValues: {
-            ':enrollmentId': enrollmentId
-          },
-          Limit: 1
-        }))
+    // Obtener el enrollment
+    let enrollment = null
+    try {
+      const result = await dynamoDB.send(new QueryCommand({
+        TableName: 'uppy_enrollment',
+        IndexName: 'enrollment-id-index',
+        KeyConditionExpression: 'enrollment_id = :enrollmentId',
+        ExpressionAttributeValues: {
+          ':enrollmentId': enrollmentId
+        },
+        Limit: 1
+      }))
 
-        if (!scanResult.Items || scanResult.Items.length === 0) {
+      if (result.Items && result.Items.length > 0) {
+        enrollment = result.Items[0]
+      }
+    } catch (error) {
+      // Si el índice no existe, intentar Scan como fallback
+      if (error.name === 'ResourceNotFoundException' || error.message?.includes('index')) {
+        try {
+          const scanResult = await dynamoDB.send(new ScanCommand({
+            TableName: 'uppy_enrollment',
+            FilterExpression: 'enrollment_id = :enrollmentId',
+            ExpressionAttributeValues: {
+              ':enrollmentId': enrollmentId
+            },
+            Limit: 1
+          }))
+
+          if (scanResult.Items && scanResult.Items.length > 0) {
+            enrollment = scanResult.Items[0]
+          }
+        } catch (scanError) {
+          console.error('Error finding enrollment:', scanError)
           return false
         }
-
-        const enrollment = scanResult.Items[0]
-        return enrollment.id_influencer === idInfluencerMain
-      } catch (scanError) {
-        console.error('Error verifying influencer access:', scanError)
-        return false
+      } else {
+        throw error
       }
     }
 
+    if (!enrollment) {
+      console.warn(`⚠️  Enrollment ${enrollmentId} not found`)
+      return false
+    }
+
+    // Ahora obtener todos los id_influencer que pertenecen a este usuario
+    // Un usuario (id_influencer_main) puede tener múltiples perfiles sociales (id_influencer)
+    let userInfluencerIds = []
+    try {
+      const influencerResult = await dynamoDB.send(new QueryCommand({
+        TableName: 'uppy_influencer',
+        IndexName: 'influencer-main-index', // GSI con id_influencer_main como partition key
+        KeyConditionExpression: 'id_influencer_main = :idInfluencerMain',
+        ExpressionAttributeValues: {
+          ':idInfluencerMain': idInfluencerMain
+        }
+      }))
+
+      if (influencerResult.Items && influencerResult.Items.length > 0) {
+        userInfluencerIds = influencerResult.Items.map(item => item.id_influencer)
+        console.log(`✅ User id_influencer_main ${idInfluencerMain} has ${userInfluencerIds.length} social profiles:`, userInfluencerIds)
+      }
+    } catch (error) {
+      // Si el índice no existe, intentar Scan como fallback
+      if (error.name === 'ResourceNotFoundException' || error.message?.includes('index')) {
+        console.warn('⚠️  Index influencer-main-index not found in uppy_influencer, using scan...')
+        try {
+          const scanResult = await dynamoDB.send(new ScanCommand({
+            TableName: 'uppy_influencer',
+            FilterExpression: 'id_influencer_main = :idInfluencerMain',
+            ExpressionAttributeValues: {
+              ':idInfluencerMain': idInfluencerMain
+            }
+          }))
+
+          if (scanResult.Items && scanResult.Items.length > 0) {
+            userInfluencerIds = scanResult.Items.map(item => item.id_influencer)
+            console.log(`✅ User id_influencer_main ${idInfluencerMain} has ${userInfluencerIds.length} social profiles (via scan):`, userInfluencerIds)
+          }
+        } catch (scanError) {
+          console.error('Error scanning uppy_influencer:', scanError)
+        }
+      } else {
+        console.error('Error querying uppy_influencer:', error)
+      }
+    }
+
+    if (userInfluencerIds.length === 0) {
+      console.warn(`⚠️  Could not find any social profiles for id_influencer_main ${idInfluencerMain}`)
+      return false
+    }
+
+    // Comparar el id_influencer del enrollment con los perfiles del usuario
+    // El enrollment puede estar atado a:
+    // 1. Un id_influencer (perfil social específico)
+    // 2. Un id_influencer_main (la persona - para compatibilidad hacia atrás)
+    const hasAccessViaSocialProfile = userInfluencerIds.includes(enrollment.id_influencer)
+    const hasAccessViaMainProfile = enrollment.id_influencer === idInfluencerMain
+    const hasAccess = hasAccessViaSocialProfile || hasAccessViaMainProfile
+    
+    console.log(`🔍 Access verification for enrollment ${enrollmentId}:`)
+    console.log(`  - User id_influencer_main: ${idInfluencerMain}`)
+    console.log(`  - User social profiles (id_influencer): ${userInfluencerIds.join(', ')}`)
+    console.log(`  - Enrollment id_influencer: ${enrollment.id_influencer}`)
+    console.log(`  - Access via social profile: ${hasAccessViaSocialProfile}`)
+    console.log(`  - Access via main profile (legacy): ${hasAccessViaMainProfile}`)
+    console.log(`  - Access granted: ${hasAccess}`)
+
+    return hasAccess
+  } catch (error) {
     // Si es un error de credenciales de AWS, permitir acceso con warning (solo para desarrollo)
-    if (error.name === 'UnrecognizedClientException' || 
-        error.message?.includes('security token') ||
-        error.message?.includes('invalid')) {
-      console.warn('⚠️  Error de credenciales AWS. Permitiendo acceso temporalmente.')
+    if (error.name === 'UnrecognizedClientException' ||
+      error.message?.includes('security token') ||
+      error.message?.includes('invalid')) {
+      console.warn('⚠️  AWS credential error. Allowing access temporarily for development.')
       return true
     }
-    
+
     console.error('Error verifying influencer access:', error)
     return false
   }

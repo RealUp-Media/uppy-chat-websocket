@@ -1,5 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb'
+import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb'
 
 // Configuración del cliente DynamoDB
 // AWS SDK v3 automáticamente busca credenciales en este orden:
@@ -26,5 +26,5 @@ if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
 export const dynamoDB = DynamoDBDocumentClient.from(client)
 
 // Exportar comandos para uso directo si es necesario
-export { GetCommand, PutCommand, QueryCommand, ScanCommand }
+export { GetCommand, PutCommand, QueryCommand, ScanCommand, UpdateCommand }
 
