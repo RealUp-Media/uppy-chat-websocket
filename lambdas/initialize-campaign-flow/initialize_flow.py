@@ -224,6 +224,20 @@ def lambda_handler(event, context):
         
         # 6. Guardar mensaje en DynamoDB
         logger.info(f"💾 Guardando mensaje inicial en DynamoDB")
+        step_type = message_data.get('step_type', 'buttons')
+        input_config = None
+        upload_config = None
+        if step_type == 'input':
+            input_config = {
+                'placeholder': message_data.get('input_placeholder', ''),
+                'submit_button_label': message_data.get('submit_button_label', 'Enviar'),
+                'validation': message_data.get('validation', {'type': 'text'})
+            }
+        elif step_type == 'upload':
+            upload_config = {
+                'allowed_types': message_data.get('allowed_types', 'both'),
+                'submit_button_label': message_data.get('submit_button_label', 'Enviar')
+            }
         message = save_initial_message(
             enrollment_id=enrollment_id,
             campaign_id=campaign_id,
@@ -231,7 +245,10 @@ def lambda_handler(event, context):
             message_text=message_text,
             accept_label=message_data.get('accept_button_label', 'Aceptar'),
             reject_label=message_data.get('reject_button_label', 'Rechazar'),
-            transitions=initial_step.get('transitions', {})
+            transitions=initial_step.get('transitions', {}),
+            step_type=step_type,
+            input_config=input_config,
+            upload_config=upload_config
         )
         
         logger.info(f"✅ Flujo inicializado exitosamente para enrollment: {enrollment_id}")
@@ -551,44 +568,37 @@ def update_enrollment_step(enrollment_id, step_id, enrollment):
         raise
 
 
-def save_initial_message(enrollment_id, campaign_id, step_id, message_text, 
-                        accept_label, reject_label, transitions):
+def save_initial_message(enrollment_id, campaign_id, step_id, message_text,
+                         accept_label, reject_label, transitions,
+                         step_type='buttons', input_config=None, upload_config=None):
     """
-    Guarda el mensaje inicial en uppy_chat_messages
-    
+    Guarda el mensaje inicial en uppy_chat_messages.
+
+    Para pasos tipo 'buttons': guarda lista de botones (accept / reject).
+    Para pasos tipo 'input': guarda input_config con placeholder, submit label y validación.
+    Para pasos tipo 'upload': guarda upload_config con allowed_types y submit_button_label.
+
     Args:
         enrollment_id: ID del enrollment
         campaign_id: ID de la campaña
         step_id: ID del paso
         message_text: Texto del mensaje
-        accept_label: Label del botón aceptar
-        reject_label: Label del botón rechazar
+        accept_label: Label del botón aceptar (solo para type 'buttons')
+        reject_label: Label del botón rechazar (solo para type 'buttons')
         transitions: Transiciones del paso
-    
+        step_type: Tipo de paso — 'buttons' (default) | 'input' | 'upload'
+        input_config: Dict con placeholder, submit_button_label y validation (solo para type 'input')
+        upload_config: Dict con allowed_types y submit_button_label (solo para type 'upload')
+
     Returns:
         dict: Mensaje guardado
     """
     try:
         table = dynamodb.Table(MESSAGES_TABLE)
-        
+
         message_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
-        
-        # Construir botones basados en transitions
-        buttons = []
-        if 'accept' in transitions:
-            buttons.append({
-                'id': 'accept',
-                'label': accept_label,
-                'action': 'accept'
-            })
-        if 'reject' in transitions:
-            buttons.append({
-                'id': 'reject',
-                'label': reject_label,
-                'action': 'reject'
-            })
-        
+
         message = {
             'message_id': message_id,
             'conversation_id': enrollment_id,
@@ -599,12 +609,33 @@ def save_initial_message(enrollment_id, campaign_id, step_id, message_text,
             'message_type': 'campaign_flow_step',
             'step_id': step_id,
             'campaign_id': campaign_id,
-            'buttons': buttons,
+            'step_type': step_type,
             'created_at': now
         }
-        
+
+        if step_type == 'buttons':
+            buttons = []
+            if 'accept' in transitions:
+                buttons.append({'id': 'accept', 'label': accept_label, 'action': 'accept'})
+            if 'reject' in transitions:
+                buttons.append({'id': 'reject', 'label': reject_label, 'action': 'reject'})
+            message['buttons'] = buttons
+
+        elif step_type == 'input':
+            message['input_config'] = input_config or {
+                'placeholder': '',
+                'submit_button_label': 'Enviar',
+                'validation': {'type': 'text'}
+            }
+
+        elif step_type == 'upload':
+            message['upload_config'] = upload_config or {
+                'allowed_types': 'both',
+                'submit_button_label': 'Enviar'
+            }
+
         table.put_item(Item=message)
-        
+
         logger.info(f"✅ Mensaje inicial guardado: {message_id}")
         return message
     except Exception as e:

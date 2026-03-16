@@ -5,6 +5,7 @@
       "step_id": "WELCOME_MESSAGE",
       "name": "Mensaje de Bienvenida",
       "order": 1,
+      "step_type": "buttons",
       "text": "Hola [Nombre] 👋\n\n¡Felicitaciones! 🎉\nFuiste seleccionado(a) para participar en la campaña de Sueros Maxlit, y nos encantaría contar contigo.\n\nAquí te compartimos las condiciones según tu categoría:\n\n💧 Micros (10k-100k seguidores)\n\nRealizar: 1 historia + 1 Reel o 1 TikTok\n\nPago: $250.000 COP\n\n💧 Nanos (1k-10k seguidores)\n\nRealizar: 2 historias\n\nPago: $100.000 COP\n\n👉 Si estás de acuerdo con estas condiciones, por favor da clic en \"Aceptar\" para enviarte los próximos pasos.\nRecuerda que ya tenemos tu dirección (proporcionada en el forms que llenaste en nuestra convocatoria)\n\n¡Quedamos atentos para continuar contigo esta campaña! 💙✨",
       "accept_button_label": "Aceptar",
       "reject_button_label": "Rechazar",
@@ -17,12 +18,29 @@
       "step_id": "TOOLKIT_INSTRUCTIONS",
       "name": "Instrucciones del Toolkit",
       "order": 2,
+      "step_type": "buttons",
       "text": "💧 YA ESTÁS LISTO PARA CREAR,\nte damos las instrucciones e información para crear tu contenido sobre MAXLIT💧\n\nSegundo paso\n\nSuero de rehidratación oral con 45mEq + Zinc, ideal para deshidratación leve a moderada.\n\nCombina ciencia + bienestar + sabor.\n\nSabores: uva 🍇, maracuyá 🥭 y cereza 🍒.\n\nDisponible en Farmatodo, Éxito, Carulla, Rappi, Olímpica y Weshop.\n\n🧰 Cómo debe ser tu contenido\n\nQue se sienta orgánico y parte de tu día a día, no como publicidad.\n\nMuéstralo en momentos reales: antes/después de entrenar, días activos o cuando quieras sentirte mejor.\n\n✅ Do's\n\nGraba tu experiencia natural usando MAXLIT.\n\nMuestra contacto real con el producto.\n\nPuedes usar frases como:\n\n\"Elige bien, siéntete bien\"\n\n\"Previene, trata y recupera\"\n\n\"Nuevo suero MAXLIT\"\n\nMantén un tono alegre y cotidiano.\n\nSe pronuncia (maxlit) tal cual como se escribe\n\n🚫 Don'ts\n\nNo mostrarlo con alcohol ni como pasante.\n\nNo llamarlo hidratante (es un suero).\n\nNo incluir #publicidad.\n\nNo mencionar niños.\n\nNo decir que da energía.\n\nSiempre escribir MAXLIT en mayúsculas.\n\n⚠️ IMPORTANTE – APROBACIÓN\n\nAntes de publicar, debes enviarnos tu contenido para aprobación.\nNingún contenido puede salir sin nuestra validación previa.\nSolo los contenidos aprobados:\n✅ cuentan dentro de la campaña\n✅ son válidos para pago 💸\n\n📅 Fecha límite\nPublicación máxima: 18 de diciembre.",
       "accept_button_label": "Entendido",
       "reject_button_label": "Cancelar",
       "transitions": {
-        "accept": "COMPLETED",
+        "accept": "SUBMIT_CONTENT_LINK",
         "reject": "REJECTED"
+      }
+    },
+    {
+      "step_id": "SUBMIT_CONTENT_LINK",
+      "name": "Envío de Link de Contenido",
+      "order": 3,
+      "step_type": "input",
+      "text": "¡Excelente! Ahora envíanos el link de tu publicación para que podamos revisarla antes de aprobarla. 🔗",
+      "input_placeholder": "https://www.instagram.com/p/...",
+      "submit_button_label": "Enviar link",
+      "validation": {
+        "type": "url",
+        "error_message": "Por favor ingresa una URL válida (ej: https://www.instagram.com/p/...)"
+      },
+      "transitions": {
+        "submit": "COMPLETED"
       }
     }
   ]

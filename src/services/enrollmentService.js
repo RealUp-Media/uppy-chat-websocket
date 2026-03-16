@@ -125,6 +125,50 @@ export async function initializeEnrollmentStep(enrollmentId, campaignId) {
 }
 
 /**
+ * Activa o desactiva las respuestas automáticas de IA para un enrollment
+ * @param {string} enrollmentId - ID del enrollment
+ * @param {boolean} aiEnabled - true para habilitar IA, false para deshabilitarla
+ * @returns {Promise<object>} Enrollment actualizado
+ */
+export async function updateEnrollmentAIStatus(enrollmentId, aiEnabled) {
+  try {
+    const now = new Date().toISOString()
+    const enrollment = await getEnrollment(enrollmentId)
+
+    if (!enrollment) {
+      throw new Error(`Enrollment ${enrollmentId} no encontrado`)
+    }
+
+    if (!enrollment.id_campaign || !enrollment.id_influencer) {
+      throw new Error(`Enrollment ${enrollmentId} no tiene las claves primarias requeridas`)
+    }
+
+    const updatedEnrollment = {
+      ...enrollment,
+      ai_enabled: aiEnabled,
+      ai_status_updated_at: now,
+      id_campaign: enrollment.id_campaign,
+      id_influencer: enrollment.id_influencer
+    }
+
+    await dynamoDB.send(new PutCommand({
+      TableName: TABLE_NAME,
+      Item: updatedEnrollment
+    }))
+
+    console.log(`🤖 Estado de IA actualizado para ${enrollmentId}: ${aiEnabled ? 'HABILITADA' : 'DESHABILITADA'}`)
+    return updatedEnrollment
+  } catch (error) {
+    if (error.name === 'UnrecognizedClientException' || error.message?.includes('security token')) {
+      console.warn('⚠️  Error de credenciales AWS al actualizar estado de IA.')
+      throw error
+    }
+    console.error('Error actualizando estado de IA del enrollment:', error)
+    throw error
+  }
+}
+
+/**
  * Actualiza el estado de un enrollment según la respuesta del influenciador
  * @param {string} enrollmentId - ID del enrollment
  * @param {string} status - Nuevo estado (ej: 'pending', 'accepted', 'rejected', 'in_progress', 'completed')

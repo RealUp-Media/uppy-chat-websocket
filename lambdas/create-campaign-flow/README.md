@@ -88,6 +88,12 @@ Esta lambda permite crear y configurar flujos de campaña que definen los pasos 
 3. **UPLOAD_FILES**: Paso para subir archivos
    - Requiere: `on_complete` (step_id del siguiente paso)
 
+4. **upload** (paso tipo upload): Subir contenido multimedia (foto, video o ambos)
+   - Requiere: `transitions.submit` (step_id del siguiente paso)
+   - `allowed_types`: `"image"` | `"video"` | `"both"` — qué tipo de archivo aceptar
+   - `submit_button_label`: (opcional, default "Enviar")
+   - Ejemplo: ver `example_upload_step.json`
+
 ### Validaciones
 
 - Todos los pasos deben tener `step_id` único
