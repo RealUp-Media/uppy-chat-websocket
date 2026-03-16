@@ -3,11 +3,130 @@ import { socketAuthMiddleware } from './middleware/socketAuth.js'
 import { saveMessage, getConversationHistory, verifyInfluencerAccess } from './services/chatService.js'
 import { generateAIResponse } from './services/lambdaService.js'
 import { getCampaignFlow, getStepById, getNextStep, isFinalStep } from './services/campaignFlowService.js'
-import { getEnrollment, updateEnrollmentStep } from './services/enrollmentService.js'
+import { getEnrollment, updateEnrollmentStep, updateEnrollmentAIStatus } from './services/enrollmentService.js'
 import { getMessageFromS3 } from './services/s3Service.js'
 
 let ioInstance = null
 
+/**
+ * Valida el valor ingresado por el usuario según las reglas de validación del paso.
+ * @param {string} value - Valor a validar
+ * @param {object} validation - Objeto de validación del paso (type, error_message)
+ * @returns {string|null} Mensaje de error o null si es válido
+ */
+function validateInputValue(value, validation) {
+  if (!value || !value.trim()) {
+    return 'Este campo es requerido'
+  }
+
+  if (!validation || !validation.type || validation.type === 'text') {
+    return null
+  }
+
+  const { type, error_message } = validation
+
+  if (type === 'url') {
+    try {
+      new URL(value)
+      return null
+    } catch {
+      return error_message || 'Por favor ingresa una URL válida (ej: https://...)'
+    }
+  }
+
+  if (type === 'number') {
+    if (value.trim() === '' || isNaN(Number(value))) {
+      return error_message || 'Por favor ingresa solo números'
+    }
+    return null
+  }
+
+  if (type === 'email') {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+    if (!emailRegex.test(value)) {
+      return error_message || 'Por favor ingresa un email válido'
+    }
+    return null
+  }
+
+  if (type === 'instagram_url') {
+    const igRegex = /^https?:\/\/(www\.)?instagram\.com\//i
+    if (!igRegex.test(value)) {
+      return error_message || 'Por favor ingresa una URL de Instagram válida (https://www.instagram.com/...)'
+    }
+    return null
+  }
+
+  if (type === 'phone') {
+    const phoneRegex = /^\+?[\d\s\-()\\.]{7,20}$/
+    if (!phoneRegex.test(value)) {
+      return error_message || 'Por favor ingresa un número de teléfono válido'
+    }
+    return null
+  }
+
+  return null
+}
+
+/**
+ * Construye el bloque de UI para el payload de un mensaje de paso de campaña.
+ *
+ * Para pasos tipo 'buttons': retorna { step_type, buttons }.
+ * Para pasos tipo 'input':   retorna { step_type, input_config }.
+ *
+ * @param {object} messageData - Datos del mensaje cargados desde S3
+ * @param {object} step        - Paso del flujo (necesario para transitions en caso de fallback)
+ * @returns {object} Objeto con step_type y el bloque de UI correspondiente
+ */
+function buildStepUiPayload(messageData, step) {
+  const stepType = messageData?.step_type || 'buttons'
+
+  if (stepType === 'input') {
+    return {
+      step_type: 'input',
+      input_config: {
+        placeholder: messageData.input_placeholder || '',
+        submit_button_label: messageData.submit_button_label || 'Enviar',
+        validation: messageData.validation || { type: 'text' }
+      }
+    }
+  }
+
+  if (stepType === 'upload') {
+    return {
+      step_type: 'upload',
+      upload_config: {
+        allowed_types: messageData.allowed_types || 'both',
+        submit_button_label: messageData.submit_button_label || 'Enviar'
+      }
+    }
+  }
+
+  // Default: buttons
+  let buttons = []
+
+  if (messageData?.buttons && Array.isArray(messageData.buttons)) {
+    buttons = messageData.buttons
+  } else if (step?.transitions) {
+    // Para step_type 'buttons' solo mostrar accept y reject (submit es para input/upload)
+    const buttonActions = ['accept', 'reject']
+    for (const [actionId] of Object.entries(step.transitions)) {
+      const action = actionId.toLowerCase()
+      if (!buttonActions.includes(action)) continue
+      let label = actionId
+      if (action === 'accept' && messageData?.accept_button_label) {
+        label = messageData.accept_button_label
+      } else if (action === 'reject' && messageData?.reject_button_label) {
+        label = messageData.reject_button_label
+      }
+      buttons.push({ id: action, label, action })
+    }
+  }
+
+  return { step_type: 'buttons', buttons }
+}
+
+export { buildStepUiPayload }
 export function initSocket(server) {
   const io = new Server(server, {
     cors: {
@@ -28,6 +147,9 @@ export function initSocket(server) {
   // Sistema de cooldown para respuestas de IA
   const aiCooldownTimers = new Map() // enrollment_id -> timeout
   const AI_COOLDOWN_MS = 5000 // 5 segundos de cooldown
+
+  // Conversaciones con IA deshabilitada (sincronizado con DynamoDB)
+  const aiDisabledConversations = new Set() // enrollment_id
 
   io.on('connection', async (socket) => {
     const user = socket.user
@@ -94,6 +216,23 @@ export function initSocket(server) {
 
       // Enviar confirmación
       socket.emit('joined_conversation', { enrollment_id })
+
+      // Sincronizar estado de IA con DynamoDB
+      try {
+        const enrollment = await getEnrollment(enrollment_id)
+        if (enrollment) {
+          // ai_enabled es true por defecto si no está definido
+          const aiEnabled = enrollment.ai_enabled !== false
+          if (!aiEnabled) {
+            aiDisabledConversations.add(enrollment_id)
+          } else {
+            aiDisabledConversations.delete(enrollment_id)
+          }
+          socket.emit('ai_status', { enrollment_id, ai_enabled: aiEnabled })
+        }
+      } catch (error) {
+        console.warn('No se pudo sincronizar estado de IA:', error)
+      }
 
       // Enviar historial de mensajes
       try {
@@ -267,67 +406,38 @@ export function initSocket(server) {
         // Si tenemos datos del mensaje, enviarlo
         if (messageData) {
           try {
-            // Construir el texto del mensaje
             const messageText = messageData.text || ''
-            
-            // Construir botones
-            let buttons = []
-            
-            // Si el mensaje ya tiene botones, usarlos
-            if (messageData.buttons && Array.isArray(messageData.buttons)) {
-              buttons = messageData.buttons
-            }
-            // Si no, construir botones desde las transiciones del paso
-            else if (nextStep.transitions) {
-              // Construir botones basados en las transiciones
-              for (const [actionId, nextStepId] of Object.entries(nextStep.transitions)) {
-                let label = actionId
-                
-                // Intentar obtener el label del mensaje en S3
-                if (actionId.toLowerCase() === 'accept' && messageData.accept_button_label) {
-                  label = messageData.accept_button_label
-                } else if (actionId.toLowerCase() === 'reject' && messageData.reject_button_label) {
-                  label = messageData.reject_button_label
-                }
-                
-                buttons.push({
-                  id: actionId.toLowerCase(),
-                  label: label,
-                  action: actionId.toLowerCase()
-                })
-              }
-            }
-            
-            // Guardar mensaje en DynamoDB
+            const uiPayload = buildStepUiPayload(messageData, nextStep)
+
+            // Guardar mensaje en DynamoDB con todos los campos de flujo para que el historial los incluya
             const savedMessage = await saveMessage({
               conversationId: enrollment_id,
               senderId: 'system',
               senderType: 'system',
               senderUsername: 'Sistema',
-              messageText: messageText
+              messageText: messageText,
+              flowData: {
+                message_type: 'campaign_flow_step',
+                step_id: nextStep.step_id,
+                campaign_id: enrollment.id_campaign,
+                ...uiPayload
+              }
             })
-            
-            // Crear payload del mensaje con botones
+
+            // Emitir payload completo a todos en la conversación
             const messagePayload = {
-              message_id: savedMessage.message_id,
+              ...savedMessage,
               conversation_id: enrollment_id,
-              sender_id: 'system',
-              sender_type: 'system',
-              sender_username: 'Sistema',
-              message_text: messageText,
               message_type: 'campaign_flow_step',
               step_id: nextStep.step_id,
               campaign_id: enrollment.id_campaign,
-              buttons: buttons,
-              created_at: savedMessage.created_at
+              ...uiPayload
             }
-            
-            // Enviar mensaje a todos en la conversación
+
             io.to(room).emit('new_message', messagePayload)
-            console.log(`📨 Mensaje del siguiente paso enviado: ${nextStep.step_id} con ${buttons.length} botones`)
+            console.log(`📨 Mensaje del siguiente paso enviado: ${nextStep.step_id} (tipo: ${uiPayload.step_type})`)
           } catch (error) {
             console.error('Error guardando/enviando mensaje del siguiente paso:', error)
-            // Continuar aunque falle el guardado del mensaje
           }
         } else {
           console.warn(`⚠️  No se pudo cargar el mensaje para el paso ${nextStep.step_id}`)
@@ -345,6 +455,244 @@ export function initSocket(server) {
       } catch (error) {
         console.error('Error processing flow action:', error)
         socket.emit('error', { message: 'Error processing flow action' })
+      }
+    })
+
+    /**
+     * Manejar envío de input (para pasos tipo 'input')
+     * Evento: flow_input
+     * Payload: { enrollment_id, input_value }
+     */
+    socket.on('flow_input', async (data) => {
+      const { enrollment_id, input_value } = data
+
+      if (!enrollment_id || input_value === undefined || input_value === null) {
+        socket.emit('error', { message: 'enrollment_id and input_value are required' })
+        return
+      }
+
+      const room = `conversation:${enrollment_id}`
+
+      // Verificar acceso
+      if (user.role === 'influencer') {
+        if (!user.id_influencer_main) {
+          socket.emit('error', { message: 'Access denied: Invalid influencer configuration' })
+          return
+        }
+        try {
+          const hasAccess = await verifyInfluencerAccess(enrollment_id, user.id_influencer_main)
+          if (!hasAccess) {
+            socket.emit('error', { message: 'Access denied' })
+            return
+          }
+        } catch (error) {
+          console.error('Error verifying access:', error)
+          socket.emit('error', { message: 'Error verifying access' })
+          return
+        }
+      }
+
+      try {
+        // Obtener enrollment y paso actual
+        const enrollment = await getEnrollment(enrollment_id)
+        if (!enrollment) {
+          socket.emit('error', { message: 'Enrollment not found' })
+          return
+        }
+
+        if (!enrollment.id_campaign || !enrollment.current_step_id) {
+          socket.emit('error', { message: 'Enrollment has no active campaign step' })
+          return
+        }
+
+        const currentStep = await getStepById(enrollment.id_campaign, enrollment.current_step_id)
+        if (!currentStep) {
+          socket.emit('error', { message: 'Current step not found' })
+          return
+        }
+
+        // Cargar datos del mensaje desde S3 para obtener la configuración de validación
+        let messageData = currentStep.ui_message || null
+        if (!messageData && currentStep.ui_message_s3_key) {
+          try {
+            messageData = await getMessageFromS3(currentStep.ui_message_s3_key)
+          } catch (s3Error) {
+            console.error('Error cargando mensaje desde S3:', s3Error)
+          }
+        }
+
+        // Verificar que el paso actual es de tipo input
+        const stepType = messageData?.step_type || currentStep.step_type || 'buttons'
+        if (stepType !== 'input') {
+          socket.emit('error', {
+            message: `Current step '${currentStep.step_id}' is not an input step (type: '${stepType}'). Use 'flow_action' for button steps.`
+          })
+          return
+        }
+
+        // Validar el valor ingresado según las reglas del paso
+        const validation = messageData?.validation
+        const validationError = validateInputValue(String(input_value), validation)
+        if (validationError) {
+          socket.emit('input_validation_error', {
+            enrollment_id,
+            step_id: currentStep.step_id,
+            error: validationError
+          })
+          return
+        }
+
+        // Guardar mensaje del usuario con el valor ingresado (incluye step_id para dashboard de entregas)
+        const userMessage = await saveMessage({
+          conversationId: enrollment_id,
+          senderId: user.sub,
+          senderType: user.role,
+          senderUsername: user.username,
+          messageText: String(input_value),
+          flowData: {
+            message_type: 'user_step_submission',
+            step_id: currentStep.step_id,
+            campaign_id: enrollment.id_campaign
+          }
+        })
+
+        io.to(room).emit('new_message', {
+          message_id: userMessage.message_id,
+          conversation_id: enrollment_id,
+          sender_id: user.sub,
+          sender_type: user.role,
+          sender_username: userMessage.sender_username || user.username,
+          message_text: String(input_value),
+          created_at: userMessage.created_at
+        })
+
+        console.log(`📝 Input del usuario guardado para paso ${currentStep.step_id}: ${String(input_value).substring(0, 80)}`)
+
+        // Determinar siguiente paso usando la transición 'submit'
+        const nextStep = await getNextStep(enrollment.id_campaign, enrollment.current_step_id, 'submit')
+
+        if (!nextStep) {
+          socket.emit('error', { message: "No 'submit' transition found for current step" })
+          return
+        }
+
+        if (isFinalStep(nextStep.step_id)) {
+          console.log(`🏁 Flujo completado para ${enrollment_id}, estado final: ${nextStep.step_id}`)
+        }
+
+        // Actualizar enrollment con el nuevo paso
+        await updateEnrollmentStep(enrollment_id, nextStep.step_id)
+
+        // Cargar mensaje del siguiente paso
+        let nextMessageData = nextStep.ui_message || null
+        if (!nextMessageData && nextStep.ui_message_s3_key) {
+          try {
+            nextMessageData = await getMessageFromS3(nextStep.ui_message_s3_key)
+          } catch (s3Error) {
+            console.error('Error cargando mensaje del siguiente paso desde S3:', s3Error)
+          }
+        }
+
+        if (nextMessageData) {
+          try {
+            const messageText = nextMessageData.text || ''
+            const uiPayload = buildStepUiPayload(nextMessageData, nextStep)
+
+            // Guardar con todos los campos de flujo para que el historial los incluya
+            const savedMessage = await saveMessage({
+              conversationId: enrollment_id,
+              senderId: 'system',
+              senderType: 'system',
+              senderUsername: 'Sistema',
+              messageText: messageText,
+              flowData: {
+                message_type: 'campaign_flow_step',
+                step_id: nextStep.step_id,
+                campaign_id: enrollment.id_campaign,
+                ...uiPayload
+              }
+            })
+
+            const messagePayload = {
+              ...savedMessage,
+              conversation_id: enrollment_id,
+              message_type: 'campaign_flow_step',
+              step_id: nextStep.step_id,
+              campaign_id: enrollment.id_campaign,
+              ...uiPayload
+            }
+
+            io.to(room).emit('new_message', messagePayload)
+            console.log(`📨 Mensaje del siguiente paso enviado: ${nextStep.step_id} (tipo: ${uiPayload.step_type})`)
+          } catch (error) {
+            console.error('Error guardando/enviando mensaje del siguiente paso:', error)
+          }
+        } else {
+          console.warn(`⚠️  No se pudo cargar el mensaje para el paso ${nextStep.step_id}`)
+        }
+
+        // Notificar cambio de paso
+        socket.emit('flow_step_changed', {
+          enrollment_id,
+          previous_step_id: enrollment.current_step_id,
+          current_step_id: nextStep.step_id,
+          step: nextStep
+        })
+
+        console.log(`🔄 Flujo actualizado por input: ${enrollment_id} -> ${nextStep.step_id}`)
+      } catch (error) {
+        console.error('Error processing flow input:', error)
+        socket.emit('error', { message: 'Error processing flow input' })
+      }
+    })
+
+    /**
+     * Activar o desactivar respuestas de IA para una conversación
+     * Solo permitido para usuarios con rol 'operations' o 'admin'
+     * Evento: toggle_ai
+     * Payload: { enrollment_id, ai_enabled: boolean }
+     */
+    socket.on('toggle_ai', async (data) => {
+      const { enrollment_id, ai_enabled } = data
+
+      if (!enrollment_id || typeof ai_enabled !== 'boolean') {
+        socket.emit('error', { message: 'enrollment_id and ai_enabled (boolean) are required' })
+        return
+      }
+
+      if (user.role !== 'operations' && user.role !== 'admin') {
+        socket.emit('error', { message: 'Access denied: only operations or admin users can toggle AI' })
+        return
+      }
+
+      const room = `conversation:${enrollment_id}`
+
+      try {
+        await updateEnrollmentAIStatus(enrollment_id, ai_enabled)
+
+        if (ai_enabled) {
+          aiDisabledConversations.delete(enrollment_id)
+        } else {
+          aiDisabledConversations.add(enrollment_id)
+          // Cancelar cualquier respuesta IA pendiente para esta conversación
+          if (aiCooldownTimers.has(enrollment_id)) {
+            clearTimeout(aiCooldownTimers.get(enrollment_id))
+            aiCooldownTimers.delete(enrollment_id)
+            console.log(`⏹️  Respuesta IA cancelada por toggle para ${enrollment_id}`)
+          }
+        }
+
+        // Notificar a todos en la conversación el cambio de estado
+        io.to(room).emit('ai_status_changed', {
+          enrollment_id,
+          ai_enabled,
+          toggled_by: user.username
+        })
+
+        console.log(`🤖 IA ${ai_enabled ? 'habilitada' : 'deshabilitada'} para ${enrollment_id} por ${user.username}`)
+      } catch (error) {
+        console.error('Error al cambiar estado de IA:', error)
+        socket.emit('error', { message: 'Error updating AI status' })
       }
     })
 
@@ -432,22 +780,35 @@ export function initSocket(server) {
         console.log(`📨 Mensaje enviado en ${enrollment_id} por ${user.username} (rol: ${user.role})`)
 
         // Si es un influencer, procesar flujo y generar respuesta automática con IA
-        if (user.role === 'influencer') {
+        if (user.role === 'influencer' && !aiDisabledConversations.has(enrollment_id)) {
           // Procesar transición de flujo si aplica
           try {
             const enrollment = await getEnrollment(enrollment_id)
             if (enrollment && enrollment.id_campaign && enrollment.current_step_id) {
               const currentStep = await getStepById(enrollment.id_campaign, enrollment.current_step_id)
-              
-              // Si el paso actual es INPUT_URL o UPLOAD_FILES, avanzar automáticamente
-              if (currentStep && (currentStep.type === 'INPUT_URL' || currentStep.type === 'UPLOAD_FILES')) {
+              const stepType = currentStep?.ui_message?.step_type || currentStep?.step_type
+
+              // Paso tipo upload: avanzar si hay attachments
+              if (stepType === 'upload' && attachments && attachments.length > 0 && currentStep?.transitions?.submit) {
+                const nextStep = await getNextStep(enrollment.id_campaign, enrollment.current_step_id, 'submit')
+                if (nextStep) {
+                  await updateEnrollmentStep(enrollment_id, nextStep.step_id)
+                  console.log(`🔄 Flujo avanzado por upload (send_message): ${enrollment_id} -> ${nextStep.step_id}`)
+                  socket.emit('flow_step_changed', {
+                    enrollment_id,
+                    previous_step_id: enrollment.current_step_id,
+                    current_step_id: nextStep.step_id,
+                    step: nextStep
+                  })
+                }
+              }
+              // Legacy: INPUT_URL o UPLOAD_FILES con on_complete
+              else if (currentStep && (currentStep.type === 'INPUT_URL' || currentStep.type === 'UPLOAD_FILES')) {
                 if (currentStep.on_complete) {
                   const nextStep = await getNextStep(enrollment.id_campaign, enrollment.current_step_id, 'on_complete')
                   if (nextStep && !isFinalStep(nextStep.step_id)) {
                     await updateEnrollmentStep(enrollment_id, nextStep.step_id)
                     console.log(`🔄 Flujo avanzado automáticamente: ${enrollment_id} -> ${nextStep.step_id}`)
-                    
-                    // Notificar cambio de paso
                     socket.emit('flow_step_changed', {
                       enrollment_id,
                       previous_step_id: enrollment.current_step_id,
@@ -601,65 +962,46 @@ export function initSocket(server) {
               )
               console.log(`✅ Respuesta IA generada: ${aiResponseText.substring(0, 50)}...`)
               
-              // Guardar respuesta de IA en DynamoDB
+              // Construir bloque de UI (buttons o input_config) del paso actual
+              let uiPayload = null
+              if (flowContext && flowContext.current_step && flowContext.current_step.message) {
+                uiPayload = buildStepUiPayload(
+                  flowContext.current_step.message,
+                  flowContext.current_step
+                )
+              }
+
+              // Guardar respuesta de IA en DynamoDB con campos de flujo para el historial
               const aiMessage = await saveMessage({
                 conversationId: enrollment_id,
                 senderId: 'ai-assistant',
                 senderType: 'ai',
                 senderUsername: 'AI Assistant',
-                messageText: aiResponseText
+                messageText: aiResponseText,
+                flowData: uiPayload ? {
+                  message_type: 'campaign_flow_step',
+                  step_id: flowContext?.current_step_id,
+                  campaign_id: flowContext?.campaign_id,
+                  ...uiPayload
+                } : undefined
               })
-              
-              // Obtener botones del paso actual si existen
-              let buttons = []
-              if (flowContext && flowContext.current_step && flowContext.current_step.message) {
-                const currentStepMessage = flowContext.current_step.message
-                
-                // Si el mensaje tiene botones directamente
-                if (currentStepMessage.buttons && Array.isArray(currentStepMessage.buttons)) {
-                  buttons = currentStepMessage.buttons
-                }
-                // Si no, construir botones desde las transiciones
-                else if (flowContext.current_step.transitions) {
-                  for (const [actionId, nextStepId] of Object.entries(flowContext.current_step.transitions)) {
-                    let label = actionId
-                    
-                    // Intentar obtener el label del mensaje
-                    if (actionId.toLowerCase() === 'accept' && currentStepMessage.accept_button_label) {
-                      label = currentStepMessage.accept_button_label
-                    } else if (actionId.toLowerCase() === 'reject' && currentStepMessage.reject_button_label) {
-                      label = currentStepMessage.reject_button_label
-                    }
-                    
-                    buttons.push({
-                      id: actionId.toLowerCase(),
-                      label: label,
-                      action: actionId.toLowerCase()
-                    })
-                  }
-                }
-              }
-              
+
               // Crear payload del mensaje de IA
               const aiMessagePayload = {
-                message_id: aiMessage.message_id,
+                ...aiMessage,
                 conversation_id: enrollment_id,
-                sender_id: 'ai-assistant',
-                sender_type: 'ai',
-                sender_username: aiMessage.sender_username || 'AI Assistant',
-                message_text: aiResponseText,
-                created_at: aiMessage.created_at
+                ...(uiPayload && {
+                  message_type: 'campaign_flow_step',
+                  step_id: flowContext?.current_step_id,
+                  campaign_id: flowContext?.campaign_id,
+                  ...uiPayload
+                })
               }
-              
-              // Agregar botones si existen
-              if (buttons.length > 0) {
-                aiMessagePayload.buttons = buttons
-                aiMessagePayload.message_type = 'campaign_flow_step'
-                aiMessagePayload.step_id = flowContext?.current_step_id
-                aiMessagePayload.campaign_id = flowContext?.campaign_id
-                console.log(`🔘 Botones agregados al mensaje de IA: ${buttons.length} botones`)
+
+              if (uiPayload) {
+                console.log(`🔘 UI payload agregado al mensaje de IA (tipo: ${uiPayload.step_type})`)
               }
-              
+
               // Enviar respuesta de IA a la conversación
               io.to(room).emit('new_message', aiMessagePayload)
               console.log(`🤖 Respuesta IA generada y enviada para ${enrollment_id}`)
@@ -674,6 +1016,8 @@ export function initSocket(server) {
           // Guardar el timeout en el mapa
           aiCooldownTimers.set(enrollment_id, timeoutId)
           console.log(`⏳ Cooldown iniciado para ${enrollment_id} (${AI_COOLDOWN_MS}ms)`)
+        } else if (user.role === 'influencer' && aiDisabledConversations.has(enrollment_id)) {
+          console.log(`ℹ️  IA deshabilitada para ${enrollment_id}, no se genera respuesta automática`)
         } else {
           console.log(`ℹ️  Usuario ${user.username} no es influencer (rol: ${user.role}), no se genera respuesta IA`)
         }

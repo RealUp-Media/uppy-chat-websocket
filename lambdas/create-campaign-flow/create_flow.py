@@ -256,136 +256,217 @@ def lambda_handler(event, context):
             return error_response
 
 
+VALID_STEP_TYPES = ['buttons', 'input', 'upload']
+VALID_VALIDATION_TYPES = ['text', 'url', 'number', 'email', 'instagram_url', 'phone']
+VALID_UPLOAD_TYPES = ['image', 'video', 'both']
+
+
 def validate_steps(steps):
     """
-    Valida la estructura simplificada de los pasos
-    
-    Cada paso debe tener:
+    Valida la estructura de los pasos del flujo.
+
+    Campos comunes (todos los tipos):
     - step_id: identificador único
-    - name: nombre descriptivo del estado (para mostrar al usuario)
-    - order: número de orden único
+    - name: nombre descriptivo del estado
+    - order: número de orden único (entero positivo)
     - text: texto informativo a mostrar
-    - accept_button_label: (opcional) texto del botón aceptar (default: "Aceptar")
-    - reject_button_label: (opcional) texto del botón rechazar (default: "Rechazar")
-    - transitions: objeto con "accept" y "reject" apuntando a step_ids válidos
-    
+    - step_type: "buttons" (default) | "input"
+    - transitions: objeto con las transiciones del paso
+
+    Paso tipo "buttons" (comportamiento por defecto):
+    - accept_button_label: (opcional, default "Aceptar")
+    - reject_button_label: (opcional, default "Rechazar")
+    - transitions debe tener "accept" y "reject"
+
+    Paso tipo "input":
+    - input_placeholder: (opcional) texto placeholder del campo
+    - submit_button_label: (opcional, default "Enviar")
+    - validation: (opcional) objeto con:
+        - type: "text" | "url" | "number" | "email" | "instagram_url" | "phone"
+        - error_message: (opcional) mensaje de error personalizado
+    - transitions debe tener "submit"; opcionalmente "cancel"
+
+    Paso tipo "upload":
+    - allowed_types: "image" | "video" | "both" — qué tipo de archivo aceptar
+    - submit_button_label: (opcional, default "Enviar")
+    - transitions debe tener "submit"; opcionalmente "cancel"
+
     Args:
         steps: Lista de pasos a validar
-    
+
     Returns:
         str: Mensaje de error si hay problemas, None si está bien
     """
     if not steps:
         return "steps array cannot be empty"
-    
-    # Validar que todos tengan step_id y order
+
     step_ids = []
     orders = []
-    
+
     for i, step in enumerate(steps):
         if not isinstance(step, dict):
             return f"Step at index {i} must be an object"
-        
+
         step_id = step.get('step_id')
         name = step.get('name')
         order = step.get('order')
         text = step.get('text')
         transitions = step.get('transitions')
-        
+        step_type = step.get('step_type', 'buttons')
+
         if not step_id:
             return f"Step at index {i} must have a step_id"
-        
+
         if not name or not isinstance(name, str):
             return f"Step {step_id} must have a name (string) field with a descriptive name for the state"
-        
+
         if order is None:
             return f"Step at index {i} must have an order number"
-        
+
         if not isinstance(order, int) or order < 1:
             return f"Step at index {i} must have a positive integer order"
-        
+
         if not text or not isinstance(text, str):
             return f"Step {step_id} must have a text (string) field with the message to display"
-        
+
+        if step_type not in VALID_STEP_TYPES:
+            return f"Step {step_id} step_type must be one of: {VALID_STEP_TYPES}"
+
         if not transitions or not isinstance(transitions, dict):
             return f"Step {step_id} must have a transitions object"
-        
-        # Validar que transitions tenga "accept" y "reject"
-        if 'accept' not in transitions:
-            return f"Step {step_id} must have 'accept' in transitions"
-        
-        if 'reject' not in transitions:
-            return f"Step {step_id} must have 'reject' in transitions"
-        
-        # Validar que los labels de botones sean strings si están presentes
-        if 'accept_button_label' in step and not isinstance(step['accept_button_label'], str):
-            return f"Step {step_id} accept_button_label must be a string"
-        
-        if 'reject_button_label' in step and not isinstance(step['reject_button_label'], str):
-            return f"Step {step_id} reject_button_label must be a string"
-        
+
+        if step_type == 'buttons':
+            if 'accept' not in transitions:
+                return f"Step {step_id} (type 'buttons') must have 'accept' in transitions"
+
+            if 'reject' not in transitions:
+                return f"Step {step_id} (type 'buttons') must have 'reject' in transitions"
+
+            if 'accept_button_label' in step and not isinstance(step['accept_button_label'], str):
+                return f"Step {step_id} accept_button_label must be a string"
+
+            if 'reject_button_label' in step and not isinstance(step['reject_button_label'], str):
+                return f"Step {step_id} reject_button_label must be a string"
+
+        elif step_type == 'input':
+            if 'submit' not in transitions:
+                return f"Step {step_id} (type 'input') must have 'submit' in transitions"
+
+            if 'input_placeholder' in step and not isinstance(step['input_placeholder'], str):
+                return f"Step {step_id} input_placeholder must be a string"
+
+            if 'submit_button_label' in step and not isinstance(step['submit_button_label'], str):
+                return f"Step {step_id} submit_button_label must be a string"
+
+            if 'validation' in step:
+                validation = step['validation']
+                if not isinstance(validation, dict):
+                    return f"Step {step_id} validation must be an object"
+                val_type = validation.get('type')
+                if val_type and val_type not in VALID_VALIDATION_TYPES:
+                    return (
+                        f"Step {step_id} validation.type '{val_type}' is invalid. "
+                        f"Must be one of: {VALID_VALIDATION_TYPES}"
+                    )
+                if 'error_message' in validation and not isinstance(validation['error_message'], str):
+                    return f"Step {step_id} validation.error_message must be a string"
+
+        elif step_type == 'upload':
+            if 'submit' not in transitions:
+                return f"Step {step_id} (type 'upload') must have 'submit' in transitions"
+
+            allowed_types = step.get('allowed_types', 'both')
+            if allowed_types not in VALID_UPLOAD_TYPES:
+                return (
+                    f"Step {step_id} allowed_types must be one of: {VALID_UPLOAD_TYPES}. "
+                    f"Got: {allowed_types}"
+                )
+
+            if 'submit_button_label' in step and not isinstance(step['submit_button_label'], str):
+                return f"Step {step_id} submit_button_label must be a string"
+
         step_ids.append(step_id)
         orders.append(order)
-    
-    # Validar unicidad de step_id
+
     if len(step_ids) != len(set(step_ids)):
         return "All step_id values must be unique"
-    
-    # Validar unicidad de order
+
     if len(orders) != len(set(orders)):
         return "All order values must be unique"
-    
-    # Validar que las transiciones apunten a step_id válidos o valores especiales
-    # Valores especiales permitidos: COMPLETED (completa campaña), REJECTED (rechaza campaña)
+
+    # Valores especiales de fin de flujo
     special_end_values = ['COMPLETED', 'REJECTED']
-    
+
     for step in steps:
         transitions = step.get('transitions', {})
         step_id = step.get('step_id')
-        
-        for transition_key in ['accept', 'reject']:
+        step_type = step.get('step_type', 'buttons')
+
+        if step_type == 'buttons':
+            transition_keys = ['accept', 'reject']
+        else:
+            # input y upload usan submit/cancel
+            transition_keys = [k for k in ['submit', 'cancel'] if k in transitions]
+
+        for transition_key in transition_keys:
             target_step_id = transitions.get(transition_key)
             if target_step_id:
-                # Permitir step_ids válidos o valores especiales de fin
                 if target_step_id not in step_ids and target_step_id not in special_end_values:
-                    return f"Transition '{transition_key}' in step '{step_id}' points to invalid step_id: {target_step_id}. Must be a valid step_id or one of: {special_end_values}"
-    
+                    return (
+                        f"Transition '{transition_key}' in step '{step_id}' points to invalid "
+                        f"step_id: {target_step_id}. Must be a valid step_id or one of: {special_end_values}"
+                    )
+
     return None
 
 
 def upload_message_to_s3(campaign_id, step_id, step_data):
     """
-    Sube el mensaje UI simplificado a S3 y retorna la key
-    
+    Sube el mensaje UI a S3 y retorna la key.
+
+    Para pasos tipo 'buttons': guarda text, accept_button_label y reject_button_label.
+    Para pasos tipo 'input': guarda text, input_placeholder, submit_button_label y validation.
+    Para pasos tipo 'upload': guarda text, allowed_types y submit_button_label.
+
     Args:
         campaign_id: ID de la campaña
         step_id: ID del paso
-        step_data: Objeto con los datos del paso (text, accept_button_label, reject_button_label)
-    
+        step_data: Datos del paso extraídos del request
+
     Returns:
         str: S3 key del mensaje subido
     """
     s3_key = f"campaign-flows/{campaign_id}/steps/{step_id}/message.json"
-    
+
     try:
-        # Construir el mensaje UI simplificado
+        step_type = step_data.get('step_type', 'buttons')
+
         ui_message = {
+            'step_type': step_type,
             'text': step_data.get('text'),
-            'accept_button_label': step_data.get('accept_button_label', 'Aceptar'),
-            'reject_button_label': step_data.get('reject_button_label', 'Rechazar')
         }
-        
-        # Convertir a JSON
+
+        if step_type == 'buttons':
+            ui_message['accept_button_label'] = step_data.get('accept_button_label', 'Aceptar')
+            ui_message['reject_button_label'] = step_data.get('reject_button_label', 'Rechazar')
+        elif step_type == 'input':
+            ui_message['input_placeholder'] = step_data.get('input_placeholder', '')
+            ui_message['submit_button_label'] = step_data.get('submit_button_label', 'Enviar')
+            if 'validation' in step_data:
+                ui_message['validation'] = step_data['validation']
+        elif step_type == 'upload':
+            ui_message['allowed_types'] = step_data.get('allowed_types', 'both')
+            ui_message['submit_button_label'] = step_data.get('submit_button_label', 'Enviar')
+
         message_json = json.dumps(ui_message, ensure_ascii=False)
-        
-        # Subir a S3
+
         s3_client.put_object(
             Bucket=S3_BUCKET,
             Key=s3_key,
             Body=message_json.encode('utf-8'),
             ContentType='application/json; charset=utf-8'
         )
-        
+
         logger.info(f"✅ Mensaje subido a S3: {s3_key}")
         return s3_key
     except Exception as e:
@@ -395,47 +476,66 @@ def upload_message_to_s3(campaign_id, step_id, step_data):
 
 def process_steps_with_s3(campaign_id, steps):
     """
-    Procesa los pasos, subiendo mensajes a S3 y creando ui_message_s3_key
-    
+    Procesa los pasos, subiendo mensajes a S3 y creando ui_message_s3_key.
+
+    Los campos de UI (text, button labels, input config) se suben a S3
+    y se eliminan del registro de DynamoDB para mantenerlo liviano.
+
     Args:
         campaign_id: ID de la campaña
-        steps: Lista de pasos con text, accept_button_label, reject_button_label
-    
+        steps: Lista de pasos del flujo
+
     Returns:
-        list: Lista de pasos con ui_message_s3_key y sin text/button labels
+        list: Lista de pasos con ui_message_s3_key y sin campos de UI
     """
+    # Campos de UI que siempre se eliminan del paso en DynamoDB
+    ui_fields_to_strip = [
+        'text',
+        'accept_button_label',
+        'reject_button_label',
+        'input_placeholder',
+        'submit_button_label',
+        'validation',
+        'allowed_types',
+    ]
+
     processed_steps = []
-    
+
     for step in steps:
         processed_step = step.copy()
-        
-        # Extraer datos del mensaje
+        step_type = processed_step.get('step_type', 'buttons')
         text = processed_step.get('text')
-        accept_label = processed_step.get('accept_button_label', 'Aceptar')
-        reject_label = processed_step.get('reject_button_label', 'Rechazar')
-        
-        # Si tiene text, subirlo a S3
+
         if text:
             step_data = {
+                'step_type': step_type,
                 'text': text,
-                'accept_button_label': accept_label,
-                'reject_button_label': reject_label
             }
+
+            if step_type == 'buttons':
+                step_data['accept_button_label'] = processed_step.get('accept_button_label', 'Aceptar')
+                step_data['reject_button_label'] = processed_step.get('reject_button_label', 'Rechazar')
+            elif step_type == 'input':
+                step_data['input_placeholder'] = processed_step.get('input_placeholder', '')
+                step_data['submit_button_label'] = processed_step.get('submit_button_label', 'Enviar')
+                if 'validation' in processed_step:
+                    step_data['validation'] = processed_step['validation']
+            elif step_type == 'upload':
+                step_data['allowed_types'] = processed_step.get('allowed_types', 'both')
+                step_data['submit_button_label'] = processed_step.get('submit_button_label', 'Enviar')
+
             s3_key = upload_message_to_s3(campaign_id, step['step_id'], step_data)
             processed_step['ui_message_s3_key'] = s3_key
-            
-            # Remover campos del mensaje del paso (ya están en S3)
-            processed_step.pop('text', None)
-            processed_step.pop('accept_button_label', None)
-            processed_step.pop('reject_button_label', None)
-            
+
+            for field in ui_fields_to_strip:
+                processed_step.pop(field, None)
+
             logger.info(f"📤 Mensaje de paso {step['step_id']} subido a S3: {s3_key}")
         elif 'ui_message_s3_key' in processed_step:
-            # Si ya tiene s3_key, mantenerlo (para actualizaciones)
             logger.info(f"ℹ️  Paso {step['step_id']} ya tiene ui_message_s3_key, manteniendo")
-        
+
         processed_steps.append(processed_step)
-    
+
     return processed_steps
 
 

@@ -18,7 +18,7 @@ bedrock_runtime = boto3.client(
 # Modelo de Bedrock a usar (configurable por variable de entorno)
 MODEL_ID = os.environ.get(
     'BEDROCK_MODEL_ID', 
-    'us.anthropic.claude-sonnet-4-5-20250929-v1:0'
+    'us.anthropic.claude-sonnet-4-6'
 )
 
 def lambda_handler(event, context):
@@ -185,7 +185,8 @@ def build_prompt(message_text, conversation_history, influencer_context, flow_co
 
     # Construir el array de mensajes en formato Claude
     messages = []
-    
+    last_role = None
+
     # Agregar historial de conversación si existe
     if conversation_history and len(conversation_history) > 0:
         # Filtrar y ordenar mensajes: excluir el mensaje actual si está presente
@@ -193,19 +194,21 @@ def build_prompt(message_text, conversation_history, influencer_context, flow_co
         filtered_history = []
         for msg in conversation_history:
             # Excluir el mensaje actual si está en el historial (por seguridad)
-            msg_text = msg.get('message_text', '')
+            msg_text = msg.get('message_text') or ''
             if msg_text != message_text:
                 filtered_history.append(msg)
         
-        # Tomar los últimos 10 mensajes para contexto de la conversación
-        recent_messages = filtered_history[-10:] if len(filtered_history) > 10 else filtered_history
+        # conversation_history viene ordenado: [más reciente, ..., más antiguo]
+        # Tomar los 10 más recientes y revertir a orden cronológico (antiguo → reciente)
+        slice_ = filtered_history[:10] if len(filtered_history) > 10 else filtered_history
+        recent_messages = list(reversed(slice_))
         
         # Convertir el historial al formato de mensajes de Claude
         # IMPORTANTE: Los roles deben alternar (user -> assistant -> user -> assistant)
         last_role = None
         for msg in recent_messages:
             sender_type = msg.get('sender_type', 'unknown')
-            text = msg.get('message_text', '')
+            text = msg.get('message_text') or ''
             
             # Determinar el rol según el tipo de remitente
             if sender_type == 'influencer' or sender_type == 'operations':
@@ -224,19 +227,20 @@ def build_prompt(message_text, conversation_history, influencer_context, flow_co
             if new_role != last_role:
                 messages.append({
                     "role": new_role,
-                    "content": content
+                    "content": content if content is not None else ""
                 })
                 last_role = new_role
             else:
                 # Si el rol es el mismo, combinar con el mensaje anterior
                 if len(messages) > 0:
-                    messages[-1]["content"] += f"\n\n{content}"
+                    prev = messages[-1]["content"]
+                    messages[-1]["content"] = (prev if prev is not None else "") + f"\n\n{content or ''}"
                 else:
                     # Si no hay mensajes previos y es "user", agregarlo
                     if new_role == "user":
                         messages.append({
                             "role": new_role,
-                            "content": content
+                            "content": content if content is not None else ""
                         })
                         last_role = new_role
     
