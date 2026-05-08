@@ -1,8 +1,38 @@
+"""
+@summary Initializes a campaign flow for an influencer enrollment: sets the
+current step, saves the first chat message, and sends an invitation via
+WhatsApp using the "uppy_intialize_campaign" template.
+
+@receives {Object} event - Lambda event object.
+
+@example Request (body):
+{
+  "enrollment_id": "5dfa21d3-3e2d-4c6b-baa0-a332e32a4b2f",
+  "campaign_id": "bc972b57-b35f-467e-994b-90e5fb09a4ae"
+}
+
+@returns {Object} HTTP-style response with statusCode and body.
+
+@example Response:
+{
+  "statusCode": 200,
+  "body": {
+    "message": "Flow initialized successfully",
+    "enrollment_id": "5dfa21d3-3e2d-4c6b-baa0-a332e32a4b2f",
+    "step_id": "MENSAJE_DE_BIENVENIDA",
+    "message_id": "a1b2c3d4-...",
+    "whatsapp_sent": true
+  }
+}
+"""
+
 import json
 import os
 import boto3
 import logging
 import uuid
+import urllib.request
+import urllib.error
 from botocore.exceptions import ClientError
 from datetime import datetime
 from boto3.dynamodb.types import TypeSerializer
@@ -32,7 +62,13 @@ s3_client = boto3.client(
 ENROLLMENT_TABLE = os.environ.get('ENROLLMENT_TABLE_NAME', 'uppy_enrollment')
 FLOW_TABLE = os.environ.get('CAMPAIGN_FLOW_TABLE_NAME', 'uppy_campaign_flow')
 MESSAGES_TABLE = os.environ.get('MESSAGES_TABLE_NAME', 'uppy_chat_messages')
+INFLUENCER_TABLE = os.environ.get('INFLUENCER_TABLE_NAME', 'uppy_influencer_main')
+CAMPAIGNS_TABLE = os.environ.get('CAMPAIGNS_TABLE_NAME', 'uppy_campaigns')
 S3_BUCKET = os.environ.get('CAMPAIGN_MESSAGES_BUCKET', 'uppy-campaign-messages')
+
+WHATSAPP_TOKEN = os.environ.get('WHATSAPP_TOKEN', '')
+WHATSAPP_PHONE_NUMBER_ID = os.environ.get('WHATSAPP_PHONE_NUMBER_ID', '')
+WHATSAPP_API_VERSION = os.environ.get('WHATSAPP_API_VERSION', 'v19.0')
 
 # Serializador para convertir valores Python a formato DynamoDB
 _serializer = TypeSerializer()
@@ -212,12 +248,21 @@ def lambda_handler(event, context):
                 })
             }
         
-        # 4. Personalizar mensaje (reemplazar [Nombre] si existe)
-        message_text = message_data.get('text', '')
-        # TODO: Si necesitas personalizar con nombre del influencer, obtenerlo aquí
-        # influencer_data = get_influencer_data(enrollment.get('id_influencer'))
-        # message_text = message_text.replace('[Nombre]', influencer_data.get('name', 'Influencer'))
-        
+        # 4. Fetch influencer and campaign data for message personalisation and WhatsApp
+        id_influencer = enrollment.get('id_influencer')
+        logger.info(f"📋 Fetching influencer data: {id_influencer}")
+        influencer_data = get_influencer_data(id_influencer) if id_influencer else None
+
+        logger.info(f"📋 Fetching campaign data: {campaign_id}")
+        campaign_data = get_campaign_data(campaign_id)
+
+        influencer_name = (influencer_data or {}).get('name', 'Influencer')
+        influencer_phone = (influencer_data or {}).get('phone', '')
+        campaign_name = (campaign_data or {}).get('campaign_name', '')
+
+        # Replace [Nombre] placeholder in the UI message if present
+        message_text = message_data.get('text', '').replace('[Nombre]', influencer_name)
+
         # 5. Actualizar enrollment con current_step_id
         logger.info(f"📝 Actualizando enrollment con current_step_id: {step_id}")
         update_enrollment_step(enrollment_id, step_id, enrollment)
@@ -252,13 +297,31 @@ def lambda_handler(event, context):
         )
         
         logger.info(f"✅ Flujo inicializado exitosamente para enrollment: {enrollment_id}")
-        
-        # Retornar respuesta
+
+        # 7. Send WhatsApp invitation template
+        whatsapp_result = None
+        if influencer_phone and influencer_name and campaign_name:
+            logger.info(
+                f"📱 Sending WhatsApp template to {influencer_phone} "
+                f"(influencer: {influencer_name}, campaign: {campaign_name})"
+            )
+            whatsapp_result = send_whatsapp_template(
+                phone=influencer_phone,
+                influencer_name=influencer_name,
+                campaign_name=campaign_name
+            )
+        else:
+            logger.warning(
+                "⚠️  Skipping WhatsApp send — missing phone, influencer name or campaign name"
+            )
+
+        # Return response
         response_body = {
             'message': 'Flow initialized successfully',
             'enrollment_id': enrollment_id,
             'step_id': step_id,
-            'message_id': message['message_id']
+            'message_id': message['message_id'],
+            'whatsapp_sent': whatsapp_result is not None
         }
         
         if 'httpMethod' in event or ('version' in event and 'requestContext' in event):
@@ -566,6 +629,129 @@ def update_enrollment_step(enrollment_id, step_id, enrollment):
     except Exception as e:
         logger.error(f"❌ Error actualizando enrollment: {e}")
         raise
+
+
+def get_influencer_data(id_influencer):
+    """
+    Fetches an influencer record from uppy_influencer_main by its primary key.
+
+    Args:
+        id_influencer: Partition key value (id_influencer_main).
+
+    Returns:
+        dict: Influencer item or None if not found.
+    """
+    try:
+        table = dynamodb.Table(INFLUENCER_TABLE)
+        response = table.get_item(Key={'id_influencer_main': id_influencer})
+
+        if 'Item' in response:
+            logger.info(f"✅ Influencer found: {id_influencer}")
+            return response['Item']
+
+        logger.warning(f"⚠️  Influencer not found: {id_influencer}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ Error fetching influencer data: {e}")
+        return None
+
+
+def get_campaign_data(id_campaign):
+    """
+    Fetches a campaign record from uppy_campaigns by its primary key.
+
+    Args:
+        id_campaign: Partition key value (id_campaign).
+
+    Returns:
+        dict: Campaign item or None if not found.
+    """
+    try:
+        table = dynamodb.Table(CAMPAIGNS_TABLE)
+        response = table.get_item(Key={'id_campaign': id_campaign})
+
+        if 'Item' in response:
+            logger.info(f"✅ Campaign found: {id_campaign}")
+            return response['Item']
+
+        logger.warning(f"⚠️  Campaign not found: {id_campaign}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ Error fetching campaign data: {e}")
+        return None
+
+
+def send_whatsapp_template(phone, influencer_name, campaign_name):
+    """
+    Sends the 'uppy_intialize_campaign' WhatsApp template to the given phone
+    number via the Meta Cloud API.
+
+    Template variables:
+        {{1}} -> influencer_name
+        {{2}} -> campaign_name
+
+    Args:
+        phone: Recipient phone number in international format (e.g. '573144043845').
+        influencer_name: Name to inject as template variable {{1}}.
+        campaign_name: Campaign name to inject as template variable {{2}}.
+
+    Returns:
+        dict: Parsed API response body, or None on failure.
+    """
+    if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
+        logger.warning("⚠️  WhatsApp credentials not configured — skipping send")
+        return None
+
+    url = (
+        f"https://graph.facebook.com/{WHATSAPP_API_VERSION}"
+        f"/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    )
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": phone,
+        "type": "template",
+        "template": {
+            "name": "uppy_intialize_campaign",
+            "language": {"code": "es"},
+            "components": [
+                {
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "text": influencer_name},
+                        {"type": "text", "text": campaign_name}
+                    ]
+                }
+            ]
+        }
+    }
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+            "Content-Type": "application/json"
+        },
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            response_body = json.loads(resp.read().decode("utf-8"))
+            logger.info(
+                f"✅ WhatsApp message sent to {phone} — "
+                f"message_id: {response_body.get('messages', [{}])[0].get('id')}"
+            )
+            return response_body
+    except urllib.error.HTTPError as e:
+        error_detail = e.read().decode("utf-8") if e.fp else str(e)
+        logger.error(f"❌ WhatsApp API HTTP error {e.code}: {error_detail}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ WhatsApp send failed: {e}")
+        return None
 
 
 def save_initial_message(enrollment_id, campaign_id, step_id, message_text,
